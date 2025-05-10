@@ -1,0 +1,1 @@
+Получение BURN, MINT и SWAP в пуле ETH/USDC в сети Ethereum.
