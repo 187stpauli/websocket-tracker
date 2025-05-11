@@ -1,7 +1,7 @@
 from config.configvalidator import ConfigValidator
 from client.client import Client
 from utils.logger import logger
-from modules.monitor import enable_monitoring
+from modules.monitor import listen_to_swaps
 import asyncio
 import json
 
@@ -31,10 +31,12 @@ async def main():
 
         # Запуск мониторинга
         logger.info("⚙️ Запускаем мониторинг...\n")
-        await enable_monitoring(client)
+        await listen_to_swaps(client)
         logger.info("⚙️ Завершение работы...\n")
     except Exception as e:
         logger.error(f"Произошла ошибка в основном пути: {e}")
+    except KeyboardInterrupt:
+        print("🛑 Остановка по Ctrl+C")
 
 
 if __name__ == "__main__":

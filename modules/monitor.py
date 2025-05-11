@@ -1,53 +1,75 @@
 import aiohttp
-from aiohttp import WSMessage
-from web3 import AsyncWeb3, WebsocketProviderV2
-from web3.datastructures import AttributeDict
-from modules.decoder import decode_uniswap_v3_event
+from eth_abi import decode_abi
 from modules.get_pool import get_uniswap_v3_pool
-from client.client import Client
-from utils.logger import logger
 import json
+from eth_utils import to_checksum_address, decode_hex
 
 with open("abi/pool_abi.json", "r", encoding="utf-8") as f:
     POOL_ABI = json.load(f)
 
 
-async def decode_tx_data(client, tx_data, pool):
-    contract = await client.get_contract(pool, POOL_ABI)
-    try:
-        function_abi = contract.decode_function_input(tx_data)
-        logger.info(f"Успешно декодировал данные. Функция {function_abi[0]}, аргументы {function_abi[1]}\n")
-    except Exception as e:
-        logger.error(f'Ошибка декодирования {e}\n')
+def decode_swap_event(log: dict, swap_topic) -> dict:
+    if log["topics"][0].lower() != swap_topic:
+        raise ValueError("❌ Это не Swap событие")
+
+    sender = to_checksum_address("0x" + log["topics"][1][-40:])
+    recipient = to_checksum_address("0x" + log["topics"][2][-40:])
+    data = decode_hex(log["data"])
+
+    amount0, amount1, sqrtPriceX96, liquidity, tick_bytes = decode_abi(
+        ["int256", "int256", "uint160", "uint128", "bytes32"], data
+    )
+
+    # int24 занимает последние 3 байта
+    tick = int.from_bytes(tick_bytes[-3:], byteorder="big", signed=True)
+
+    return {
+        "event": "Swap",
+        "sender": sender,
+        "recipient": recipient,
+        "amount0": amount0,
+        "amount1": amount1,
+        "sqrtPriceX96": sqrtPriceX96,
+        "liquidity": liquidity,
+        "tick": tick
+    }
 
 
-async def enable_monitoring(client: Client):
-    swap_topic = "0x783cca1c0412dd0d695e784568d7c5edf5b509b5c8c6c33c1c3fef6aef7e623c"
-    mint_topic = "0x9f679b1155ef32ca4e7724a797156521ced63d40c5d9fdcf7c6c2e6dc3e3a002"
-    burn_topic = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
-    topics = [[swap_topic, mint_topic, burn_topic]]
+async def listen_to_swaps(client):
+    swap_topic = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
     pool = await get_uniswap_v3_pool(client)
 
-    async with AsyncWeb3.persistent_websocket(WebsocketProviderV2(client.rpc_url)) as w3:
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(client.rpc_url) as ws:
+            # Отправка подписки
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_subscribe",
+                "params": [
+                    "logs",
+                    {
+                        "address": pool,
+                        "topics": [[swap_topic]]
+                    }
+                ]
+            }
+            await ws.send_str(json.dumps(payload))
+            print("🔌 Подписка на Swap отправлена...\n")
 
-        subscription_id = await w3.eth.subscribe("logs", {"address": pool})
-
-        logger.info("🔌 Подписка отправлена\n")
-
-        try:
-            while True:
-                msg = await w3.provider._ws_recv()
-                data = msg
-                params = data.get("params")
-                if params:
-                    result = params.get("result")
-                    if result["address"] == pool.lower():
-                        logger.info(f"Найдена транзакция от адреса {pool}")
-                        tx_data = result["data"]
-                        if tx_data:
-                            await decode_tx_data(client, tx_data, pool)
-                            logger.info(f"Пытаюсь декодировать транзакцию {tx_data}")
-                logger.info(f"📩 Новое сообщение: {data}")
-
-        except Exception as e:
-            logger.error(f"Ошибка при прослушивании сокета: {e}")
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    if "params" in data:
+                        try:
+                            log = data["params"]["result"]
+                            decoded = decode_swap_event(log, swap_topic)
+                            print("✅ Swap Event:")
+                            for k, v in decoded.items():
+                                print(f"  {k}: {v}")
+                            print()
+                        except Exception as e:
+                            print(f"⚠️ Ошибка декодирования: {e}")
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    print(f"❌ WebSocket ошибка: {msg.data}")
+                    break
