@@ -90,7 +90,6 @@ class ConfigValidator:
     async def validate_required_keys(self):
         required_keys = [
             "network",
-            "private_key",
             "proxy",
             "token1",
             "token2"
